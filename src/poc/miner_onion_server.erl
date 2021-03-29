@@ -8,6 +8,7 @@
 -behavior(gen_server).
 
 -include_lib("blockchain/include/blockchain_vars.hrl").
+-include_lib("blockchain/include/blockchain_caps.hrl").
 
 %% ------------------------------------------------------------------
 %% API Function Exports
@@ -115,48 +116,56 @@ send_receipt(Data, OnionCompactKey, Type, Time, RSSI, SNR, Frequency, Channel, D
     Ledger = blockchain:ledger(Chain),
     OnionKeyHash = crypto:hash(sha256, OnionCompactKey),
     {ok, PoCs} = blockchain_ledger_v1:find_poc(OnionKeyHash, Ledger),
-    Results = lists:foldl(
-        fun(PoC, Acc) ->
-            Challenger = blockchain_ledger_poc_v2:challenger(PoC),
-            Address = blockchain_swarm:pubkey_bin(),
-
-            Receipt0 = case blockchain:config(?data_aggregation_version, Ledger) of
-                           {ok, 1} ->
-                               blockchain_poc_receipt_v1:new(Address, Time, RSSI, Data, Type, SNR, Frequency);
-                           {ok, 2} ->
-                               blockchain_poc_receipt_v1:new(Address, Time, RSSI, Data, Type, SNR, Frequency, Channel, DataRate);
-                           _ ->
-                               blockchain_poc_receipt_v1:new(Address, Time, RSSI, Data, Type)
-                       end,
-
-            {ok, _, SigFun, _ECDHFun} = blockchain_swarm:keys(),
-            Receipt1 = blockchain_poc_receipt_v1:sign(Receipt0, SigFun),
-            EncodedReceipt = blockchain_poc_response_v1:encode(Receipt1),
-            case erlang:is_pid(Stream) of
-                true ->
-                    Stream ! {send, EncodedReceipt},
-                    Acc;
-                false ->
-                    P2P = libp2p_crypto:pubkey_bin_to_p2p(Challenger),
-                    case miner_poc:dial_framed_stream(blockchain_swarm:swarm(), P2P, []) of
-                        {error, _Reason} ->
-                            lager:error("failed to dial challenger ~p (~p)", [P2P, _Reason]),
-                            [error|Acc];
-                        {ok, NewStream} ->
-                            _ = miner_poc_handler:send(NewStream, EncodedReceipt),
-                            Acc
-                    end
-            end
-        end,
-        [],
-        PoCs
-    ),
-    case Results == [] of
-        true ->
-            ok;
+    Address = blockchain_swarm:pubkey_bin(),
+    %% check this GW has the capability to send receipts
+    %% it not then we are done
+    {ok, GWAddrInfo} = blockchain_ledger_v1:find_gateway_info(Address, Ledger),
+    case blockchain_ledger_gateway_v2:is_valid_capability(GWAddrInfo, ?GW_CAPABILITY_POC_RECEIPT, Ledger) of
         false ->
-            timer:sleep(timer:seconds(30)),
-            send_receipt(Data, OnionCompactKey, Type, Time, RSSI, SNR, Frequency, Channel, DataRate, Stream, State, Retry-1)
+            {error, invalid_capability};
+        true ->
+            Results =
+                lists:foldl(
+                    fun(PoC, Acc) ->
+                        Challenger = blockchain_ledger_poc_v2:challenger(PoC),
+                        Receipt0 = case blockchain:config(?data_aggregation_version, Ledger) of
+                                       {ok, 1} ->
+                                           blockchain_poc_receipt_v1:new(Address, Time, RSSI, Data, Type, SNR, Frequency);
+                                       {ok, 2} ->
+                                           blockchain_poc_receipt_v1:new(Address, Time, RSSI, Data, Type, SNR, Frequency, Channel, DataRate);
+                                       _ ->
+                                           blockchain_poc_receipt_v1:new(Address, Time, RSSI, Data, Type)
+                                   end,
+
+                        {ok, _, SigFun, _ECDHFun} = blockchain_swarm:keys(),
+                        Receipt1 = blockchain_poc_receipt_v1:sign(Receipt0, SigFun),
+                        EncodedReceipt = blockchain_poc_response_v1:encode(Receipt1),
+                        case erlang:is_pid(Stream) of
+                            true ->
+                                Stream ! {send, EncodedReceipt},
+                                Acc;
+                            false ->
+                                P2P = libp2p_crypto:pubkey_bin_to_p2p(Challenger),
+                                case miner_poc:dial_framed_stream(blockchain_swarm:swarm(), P2P, []) of
+                                    {error, _Reason} ->
+                                        lager:error("failed to dial challenger ~p (~p)", [P2P, _Reason]),
+                                        [error|Acc];
+                                    {ok, NewStream} ->
+                                        _ = miner_poc_handler:send(NewStream, EncodedReceipt),
+                                        Acc
+                                end
+                        end
+                    end,
+                [],
+                PoCs
+            ),
+            case Results == [] of
+                true ->
+                    ok;
+                false ->
+                    timer:sleep(timer:seconds(30)),
+                    send_receipt(Data, OnionCompactKey, Type, Time, RSSI, SNR, Frequency, Channel, DataRate, Stream, State, Retry-1)
+            end
     end.
 
 -spec  send_witness(Data :: binary(),
@@ -194,41 +203,48 @@ send_witness(Data, OnionCompactKey, Time, RSSI, SNR, Frequency, Channel, DataRat
     OnionKeyHash = crypto:hash(sha256, OnionCompactKey),
     {ok, PoCs} = blockchain_ledger_v1:find_poc(OnionKeyHash, Ledger),
     SelfPubKeyBin = blockchain_swarm:pubkey_bin(),
-    lists:foreach(
-        fun(PoC) ->
-            Challenger = blockchain_ledger_poc_v2:challenger(PoC),
+    {ok, GWInfo} = blockchain_ledger_v1:find_gateway_info(SelfPubKeyBin, Ledger),
+    %% check this GW has the capability to send witnesses
+    %% it not then we are done
+    case blockchain_ledger_gateway_v2:is_valid_capability(GWInfo, ?GW_CAPABILITY_POC_WITNESS, Ledger) of
+        false ->
+            ok;
+        true ->
+            lists:foreach(
+                fun(PoC) ->
+                    Challenger = blockchain_ledger_poc_v2:challenger(PoC),
+                    Witness0 = case blockchain:config(?data_aggregation_version, Ledger) of
+                                   {ok, 1} ->
+                                       blockchain_poc_witness_v1:new(SelfPubKeyBin, Time, RSSI, Data, SNR, Frequency);
+                                   {ok, 2} ->
+                                       blockchain_poc_witness_v1:new(SelfPubKeyBin, Time, RSSI, Data, SNR, Frequency, Channel, DataRate);
+                                   _ ->
+                                       blockchain_poc_witness_v1:new(SelfPubKeyBin, Time, RSSI, Data)
+                               end,
 
-            Witness0 = case blockchain:config(?data_aggregation_version, Ledger) of
-                           {ok, 1} ->
-                               blockchain_poc_witness_v1:new(SelfPubKeyBin, Time, RSSI, Data, SNR, Frequency);
-                           {ok, 2} ->
-                               blockchain_poc_witness_v1:new(SelfPubKeyBin, Time, RSSI, Data, SNR, Frequency, Channel, DataRate);
-                           _ ->
-                               blockchain_poc_witness_v1:new(SelfPubKeyBin, Time, RSSI, Data)
-                       end,
-
-            {ok, _, SigFun, _ECDHFun} = blockchain_swarm:keys(),
-            Witness1 = blockchain_poc_witness_v1:sign(Witness0, SigFun),
-            case SelfPubKeyBin =:= Challenger of
-                true ->
-                    lager:info("challenger is ourself so sending directly to poc statem"),
-                    miner_poc_statem:witness(SelfPubKeyBin, Witness1);
-                false ->
-                    EncodedWitness = blockchain_poc_response_v1:encode(Witness1),
-                    P2P = libp2p_crypto:pubkey_bin_to_p2p(Challenger),
-                    case miner_poc:dial_framed_stream(blockchain_swarm:swarm(), P2P, []) of
-                        {error, _Reason} ->
-                            lager:warning("failed to dial challenger ~p: ~p", [P2P, _Reason]),
-                            timer:sleep(timer:seconds(30)),
-                            send_witness(Data, OnionCompactKey, Time, RSSI, SNR, Frequency, Channel, DataRate, State, Retry-1);
-                        {ok, Stream} ->
-                            _ = miner_poc_handler:send(Stream, EncodedWitness)
+                    {ok, _, SigFun, _ECDHFun} = blockchain_swarm:keys(),
+                    Witness1 = blockchain_poc_witness_v1:sign(Witness0, SigFun),
+                    case SelfPubKeyBin =:= Challenger of
+                        true ->
+                            lager:info("challenger is ourself so sending directly to poc statem"),
+                            miner_poc_statem:witness(SelfPubKeyBin, Witness1);
+                        false ->
+                            EncodedWitness = blockchain_poc_response_v1:encode(Witness1),
+                            P2P = libp2p_crypto:pubkey_bin_to_p2p(Challenger),
+                            case miner_poc:dial_framed_stream(blockchain_swarm:swarm(), P2P, []) of
+                                {error, _Reason} ->
+                                    lager:warning("failed to dial challenger ~p: ~p", [P2P, _Reason]),
+                                    timer:sleep(timer:seconds(30)),
+                                    send_witness(Data, OnionCompactKey, Time, RSSI, SNR, Frequency, Channel, DataRate, State, Retry-1);
+                                {ok, Stream} ->
+                                    _ = miner_poc_handler:send(Stream, EncodedWitness)
+                            end
                     end
-            end
-        end,
-        PoCs
-    ),
-    ok.
+                end,
+                PoCs
+            ),
+            ok
+    end.
 
 %% ------------------------------------------------------------------
 %% gen_server Function Definitions

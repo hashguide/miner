@@ -133,17 +133,16 @@ init(Args) ->
                     %% to handle scenario whereby existing hotspots transition to light gateways
                     %% check the GW mode is compatible with the loaded state, if not default to requesting
                     Ledger = blockchain:ledger(Blockchain),
-                    case blockchain_ledger_v1:find_gateway_info(Address, Ledger) of
-                        {ok, GwInfo} ->
-                            case blockchain_ledger_gateway_v2:is_valid_capability(GwInfo, ?GW_CAPABILITY_POC_CHALLENGER, Ledger) of
-                                true ->
-                                    {ok, State, maybe_init_addr_hash(Data#data{base_dir=BaseDir, blockchain=Blockchain,
-                                                          address=Address, poc_interval=Delay, state=State,
-                                                          poc_restarts = POCRestarts - 1})};
-                                _ ->
-                                    {ok, requesting, maybe_init_addr_hash(#data{base_dir=BaseDir, blockchain=Blockchain,
-                                         address=Address, poc_interval=Delay, state=requesting})}
-                            end;
+                    {ok, GwInfo} = blockchain_ledger_v1:find_gateway_info(Address, Ledger),
+                    case blockchain_ledger_gateway_v2:is_valid_capability(GwInfo, ?GW_CAPABILITY_POC_CHALLENGER, Ledger) of
+                        true ->
+                            {ok, State, maybe_init_addr_hash(Data#data{base_dir=BaseDir, blockchain=Blockchain,
+                                                  address=Address, poc_interval=Delay, state=State,
+                                                  poc_restarts = POCRestarts - 1})};
+                        _ ->
+                            {ok, requesting, maybe_init_addr_hash(#data{base_dir=BaseDir, blockchain=Blockchain,
+                                 address=Address, poc_interval=Delay, state=requesting})}
+                    end;
                 false ->
                     lager:debug("Loaded unsupported state ~p, ignoring and defaulting to requesting", [State]),
                     {ok, requesting, maybe_init_addr_hash(#data{base_dir=BaseDir, blockchain=Blockchain,
@@ -466,7 +465,7 @@ handle_targeting(Entropy, Height, Ledger, Data) ->
                     GatewayScoreMap = blockchain_utils:score_gateways(Ledger),
 
                     %% Filtered gateways
-                    GatewayScores = blockchain_poc_target_v2:filter(GatewayScoreMap, ChallengerAddr, ChallengerLoc, Height, Vars),
+                    GatewayScores = blockchain_poc_target_v2:filter(GatewayScoreMap, ChallengerAddr, ChallengerLoc, Height, Vars, Ledger),
                     case blockchain_poc_target_v2:target(Entropy, GatewayScores, Vars) of
                         {error, no_target} ->
                             lager:info("Limit: ~p~n", [maps:get(poc_path_limit, Vars)]),
@@ -513,7 +512,7 @@ handle_challenging({Entropy, TargetRandState}, Target, Gateways, Height, Ledger,
                               {ok, V} when V < 4 ->
                                   Self ! {Attempt, blockchain_poc_path:build(Entropy, Target, Gateways, Height, Ledger)};
                               {ok, V} when V < 7 ->
-                                  Path = blockchain_poc_path_v2:build(Target, Gateways, Time, Entropy, Vars),
+                                  Path = blockchain_poc_path_v2:build(Target, Gateways, Time, Entropy, Vars, Ledger),
                                   lager:info("poc_v4 Path: ~p~n", [Path]),
                                   Self ! {Attempt, {ok, Path}};
                               {ok, V} when V < 8 ->
@@ -824,7 +823,7 @@ allow_request(BlockHash, #data{blockchain=Blockchain,
     try
         case blockchain_ledger_v1:find_gateway_info(Address, Ledger) of
             {ok, GwInfo} ->
-                case blockchain_ledger_gateway_v2:is_valid_capability(GWInfo, ?GW_CAPABILITY_POC_CHALLENGER, Ledger) of
+                case blockchain_ledger_gateway_v2:is_valid_capability(GwInfo, ?GW_CAPABILITY_POC_CHALLENGER, Ledger) of
                     true ->
                         {ok, Block} = blockchain:get_block(BlockHash, Blockchain),
                         Height = blockchain_block:height(Block),
