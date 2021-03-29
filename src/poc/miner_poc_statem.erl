@@ -804,7 +804,7 @@ validate_witness(Witness, Ledger) ->
                     lager:warning("ignoring witness ~p location undefined", [Gateway]),
                     false;
                 _ ->
-                    blockchain_poc_witness_v1:is_valid(Witness)
+                    blockchain_poc_witness_v1:is_valid(Witness, Ledger)
             end
     end.
 
