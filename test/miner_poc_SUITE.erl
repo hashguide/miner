@@ -490,9 +490,8 @@ basic_test_light_gateway(Config) ->
         end,
         lists:seq(1, 25)
     ),
-
+    % confirm we remain in requesting state
     ?assertEqual(requesting,  erlang:element(1, sys:get_state(Statem))),
-    ok = add_block(Chain, ConsensusMembers, []),
 
     ?assert(meck:validate(blockchain_worker)),
     meck:unload(blockchain_worker),
